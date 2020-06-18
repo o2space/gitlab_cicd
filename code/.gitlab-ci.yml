@@ -1,0 +1,204 @@
+#GIT_STRATEGY: none
+#GIT策略，定义拉取代码的方式，有3种：clone/fetch/none，默认为clone，速度最慢，每步job都会重新clone一次代码。我们一般将它设置为none，在具体任务里设置为fetch就可以满足需求，毕竟不是每步都需要新代码，那也不符合我们测试的流程
+#在job中可以用${GIT_STRATEGY}来使用这个变量。常用的预定义变量有CI_COMMIT_REF_NAME（项目所在的分支或标签名称），CI_JOB_NAME（任务名称），CI_JOB_STAGE（任务阶段）
+
+before_script:
+  - |
+    ifconfig | grep "inet "
+    pwd
+#    export LANG="en_US.UTF-8" 
+#    export
+# 全局变量，保证不同stage不会每次重置代码
+# 某些步骤需要可以在Job中添加（如结果回调中）
+
+#after_script:
+#  - |
+#    pwd
+
+stages:
+  - 1.输出环境变量
+  - 2.设置编译前脚本
+  - 3.pod install
+  - 4.编译检查
+  - 5.结果处理
+
+#1.输出环境变量
+#gitlab系统自带环境变量：http://gitlab.code.mob.com/help/ci/variables/predefined_variables.md
+print_env: 
+  stage: 1.输出环境变量
+  script:
+    - export LANG="en_US.UTF-8" 
+    - export
+    #- echo "==================================================="
+    #- echo "project_name:${O2Space_ProjectName}"
+    #- echo "project_workspace:${O2Space_WorkSpace}"
+    #- echo "sdk_schemes:${O2Space_SDKSchemes}"
+    #- echo "ipa_scheme:${O2Space_IPAScheme}"
+    #- echo "==================================================="
+  only:
+    - merge_requests
+  tags:
+    - iOSTeamRunner
+  variables:
+    GIT_STRATEGY: none
+
+#2.设置编译前脚本
+# 开启自身clone项目 及 clone/fetch 相关封装shell脚本
+setup_script: 
+  stage: 2.设置编译前脚本
+  script:
+    - |
+      if [ -d ToolScript ]; then
+        #企业微信获取token存储时文件创建需要权限
+        chmod u+w ToolScript
+        builtin cd ToolScript
+        git fetch
+        git reset --hard origin/master
+        chmod +x ./project_build_check.sh
+        chmod +x ./qiyewechat_sendMsg_api.sh
+        builtin cd ..
+      else
+        #添加ssh,否则git clone将无权限
+        username="wukx"
+        ssh_PATH="/Users/wkx/Documents/Develop/.ssh/${username}_rsa"
+        eval $(ssh-agent)
+        ssh-add $ssh_PATH
+        #将shell脚本放到ToolScript项目里便于管理
+        git clone git@gitlab.com:O2Space/ToolScript.git
+        ssh-agent -k
+      fi
+      #当前Gitlab账号
+      users=${GITLAB_USER_LOGIN}
+      eventContent=""
+      if [ ${CI_PIPELINE_SOURCE} = "merge_request_event" ]; then
+        eventContent="您发起了merge请求，正在为您进行代码校验 \n项目：${CI_PROJECT_PATH}，\n发起分支：${CI_MERGE_REQUEST_SOURCE_BRANCH_NAME}，\n目标分支：${CI_MERGE_REQUEST_TARGET_BRANCH_NAME}"
+      fi
+      #发送企业微信消息，通知发起者，开始编译校验 
+      type=1
+      builtin cd ToolScript
+      source qiyewechat_sendMsg_api.sh -u "${users}" -c "${eventContent}" -y "${type}"
+      builtin cd ..
+  only:
+    - merge_requests
+  tags:
+    - iOSTeamRunner
+  variables:
+    GIT_STRATEGY: clone
+
+#3.pod install
+pod_install:
+  stage: 3.pod install
+  script:
+    - |
+      pwd
+      echo "此项目无需通过Pod集成第三方SDK"
+#      source pod install
+  only:
+    - merge_requests
+  tags:
+    - iOSTeamRunner
+  variables:
+    GIT_STRATEGY: none
+
+#4.编译检查
+bulid_script:
+  stage: 4.编译检查
+  script:
+    - |
+      project_dir=`pwd`
+      project_name=${O2Space_ProjectName}
+      project_workspace=${O2Space_WorkSpace}
+      sdk_schemes=${O2Space_SDKSchemes}
+      ipa_scheme=${O2Space_IPAScheme}
+      echo $project_dir
+      echo "project_name:${project_name}"
+      echo "project_workspace:${project_workspace}"
+      echo "sdk_schemes:${sdk_schemes}"
+      echo "ipa_scheme:${ipa_scheme}"
+      chmod +x ToolScript/project_build_check.sh
+      source ToolScript/project_build_check.sh "${project_dir}" "${project_name}" "${project_workspace}" "${sdk_schemes}" "${ipa_scheme}"
+  only:
+    - merge_requests
+  tags: 
+    - iOSTeamRunner
+  variables:
+    GIT_STRATEGY: none
+
+#5.结果处理
+fail_script:
+  stage: 5.结果处理
+  script:
+    - |
+      echo "校验失败"
+      users=${GITLAB_USER_LOGIN}
+      timeStr=$(date "+%Y-%m-%d %H:%M:%S")
+      title="Gitlab操作：代码编译校验结果通知"
+      branchInfo=${CI_BUILD_REF_NAME}
+      eventContent=""
+      weblink=""
+      if [ ${CI_PIPELINE_SOURCE} = "merge_request_event" ]; then
+        branchInfo=${CI_MERGE_REQUEST_SOURCE_BRANCH_NAME}→${CI_MERGE_REQUEST_TARGET_BRANCH_NAME}
+        eventContent=${CI_MERGE_REQUEST_TITLE}
+        weblink=${CI_MERGE_REQUEST_PROJECT_URL}/merge_requests/${CI_MERGE_REQUEST_IID}
+      fi
+      description="<div class='gray'>${timeStr}</div>
+                  <div class='normal'>项目:${CI_PROJECT_PATH}</div>
+                  <div class='normal'>事件:${CI_PIPELINE_SOURCE}</div>
+                  <div class='normal'>涉及分支:${branchInfo}</div>
+                  <div class='normal'>事件内容:${eventContent}</div>
+                  <div class='normal'>pipeline:${CI_PIPELINE_ID}</div>
+                  <div class='highlight'>校验结果：失败</div>"
+      type=2
+      builtin cd ToolScript
+      source qiyewechat_sendMsg_api.sh -u "${users}" -t "${title}" -d "${description}" -l "${weblink}" -y "${type}"
+      builtin cd ..
+  when: on_failure
+  only: 
+    - merge_requests
+  tags: 
+    - iOSTeamRunner
+  variables:
+    GIT_STRATEGY: none
+
+#5.结果处理
+success_script:
+  stage: 5.结果处理
+  script:
+    - |
+      echo "校验成功"
+      users=${GITLAB_USER_LOGIN}
+      resultStr=""
+      if [ ! -n "$O2Space_MergeOwner" ]; then
+        echo "O2Space_MergeOwner is null"
+      else
+        users=${users},${O2Space_MergeOwner}
+        resultStr="，请相关人员:${O2Space_MergeOwner}，进行merge操作"
+      fi
+      timeStr=$(date "+%Y-%m-%d %H:%M:%S")
+      title="Gitlab操作：代码编译校验结果通知"
+      branchInfo=${CI_BUILD_REF_NAME}
+      eventContent=""
+      weblink=""
+      if [ ${CI_PIPELINE_SOURCE} = "merge_request_event" ]; then
+        branchInfo=${CI_MERGE_REQUEST_SOURCE_BRANCH_NAME}→${CI_MERGE_REQUEST_TARGET_BRANCH_NAME}
+        eventContent=${CI_MERGE_REQUEST_TITLE}
+        weblink=${CI_MERGE_REQUEST_PROJECT_URL}/merge_requests/${CI_MERGE_REQUEST_IID}
+      fi
+      description="<div class='gray'>${timeStr}</div>
+                  <div class='normal'>项目:${CI_PROJECT_PATH}</div>
+                  <div class='normal'>事件:${CI_PIPELINE_SOURCE}</div>
+                  <div class='normal'>涉及分支:${branchInfo}</div>
+                  <div class='normal'>事件内容:${eventContent}</div>
+                  <div class='normal'>pipeline:${CI_PIPELINE_ID}</div>
+                  <div class='blue'>校验结果：成功${resultStr}</div>"
+      type=2
+      builtin cd ToolScript
+      source qiyewechat_sendMsg_api.sh -u "${users}" -t "${title}" -d "${description}" -l "${weblink}" -y "${type}"
+      builtin cd ..
+  when: on_success
+  only: 
+    - merge_requests
+  tags: 
+    - iOSTeamRunner
+  variables:
+    GIT_STRATEGY: none
